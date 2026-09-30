@@ -23,7 +23,14 @@ def chat_turn(message: str, history: list[dict]) -> tuple[str, list[dict]]:
         "injection": result["injection"], "latency_ms": ms,
     }
     _HISTORY.append(entry)
-    badge = " 🟠 offline" if result["offline"] else " 🟢 live LLM"
+    # Guardrail refusals are rule-based template responses — no LLM runs,
+    # so they must never wear the "live LLM" badge.
+    if result["injection"]:
+        badge = " 🛡 guardrail (rule-based refusal)"
+    elif result["offline"]:
+        badge = " 🟠 offline"
+    else:
+        badge = " 🟢 live LLM"
     history = history + [
         {"role": "user", "content": message},
         {"role": "assistant",
@@ -40,7 +47,11 @@ def status_line() -> str:
 
 
 def history_table() -> list[list]:
-    return [[e["user"][:60], e["intent"], "offline" if e["offline"] else "live",
+    def _mode(e: dict) -> str:
+        if e["injection"]:
+            return "blocked (guardrail)"
+        return "offline" if e["offline"] else "live"
+    return [[e["user"][:60], e["intent"], _mode(e),
              "yes" if e["escalated"] else "no", e["latency_ms"]]
             for e in _HISTORY]
 

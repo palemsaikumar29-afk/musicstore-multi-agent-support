@@ -48,14 +48,14 @@ LLM calls never attempted). Retries use exponential backoff (3 attempts).
 make install          # create .venv and install pinned requirements
 make seed             # create + seed the SQLite store database
 cp .env.example .env  # fill in at least one LLM API key
-make test             # 39 unit + e2e tests (no network, no keys needed)
+make test             # 44 unit + e2e tests (no network, no keys needed)
 make lint             # ruff
 make run              # launch the Gradio app on 127.0.0.1:7861
 ```
 
 ## Test evidence
 
-- `make test`: **39 passed** — catalog/order read-models against the seeded
+- `make test`: **44 passed** — catalog/order read-models against the seeded
   DB, keyword router intent coverage, 26-pattern injection detection,
   PII redaction (email/phone/card/SSN), full pipeline e2e per intent
   (search, order by invoice/email, FAQ, recommendation, handoff,

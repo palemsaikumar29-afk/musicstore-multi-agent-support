@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import re
 
-# 26 prompt-injection / jailbreak patterns (curated, same family as agent 3)
+# 26 prompt-injection / jailbreak patterns (mirrors the agent-3 family so
+# bare instruction-override attempts like "ignore all instructions" are
+# caught — see test_injection_bare_ignore_all_instructions)
 _INJECTION_PATTERNS = [
-    r"ignore\s+(all\s+)?(previous|prior)\s+instructions",
-    r"disregard\s+(all\s+)?(previous|prior)\s+instructions",
-    r"forget\s+(all\s+)?(previous|prior)\s+instructions",
-    r"override\s+(your\s+)?(system|prior)\s+(prompt|instructions)",
+    r"ignor(e|ing)\s+(all\s+|previous\s+|prior\s+|above\s+|your\s+|the\s+)*instructions?",
+    r"disregard\s+(all\s+|previous\s+|prior\s+|above\s+|your\s+|the\s+)*(instructions?|rules?|directives?)",
+    r"forget\s+(all\s+|your\s+|previous\s+|prior\s+|above\s+|the\s+)*(instructions?|rules?|training)",
+    r"override\s+(your\s+|the\s+)?(instructions?|rules?|safety|guardrails?)",
     r"system\s+prompt",
     r"you\s+are\s+now\s+(a|an)\s+",
     r"act\s+as\s+(if\s+you\s+were\s+)?(a|an)\s+",
