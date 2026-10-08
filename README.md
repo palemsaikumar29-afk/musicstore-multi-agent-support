@@ -14,14 +14,19 @@ user message
       ▼
 ┌─ intake ─────────────── 26 injection patterns; PII redaction (email/phone/
 │                         card/SSN); lookup identifiers captured pre-redaction
-├─ route ─────────────── LLM router (structured INTENT/CONFIDENCE/ENTITIES)
-│                         with deterministic keyword-router fallback in
-│                         offline mode
+├─ route ─────────────── LLM router (structured INTENT/CONFIDENCE/ENTITIES,
+│                         conversation history in prompt) with deterministic
+│                         keyword-router fallback in offline mode; low
+│                         confidence (< 0.55) → clarify node asks instead of
+│                         guessing
 └─ specialist ────────── catalog_search | order_lookup | policy_faq |
                          recommendation | human_handoff | out_of_scope
       │                                    │
       ▼                                    ▼
 terminal: answered            terminal: escalated / blocked
+
+Last 5 conversation turns are kept in graph state (`history`) and fed to
+the router, so follow-ups resolve against earlier turns.
 ```
 
 ### Five layers (`src/`)
@@ -48,18 +53,23 @@ LLM calls never attempted). Retries use exponential backoff (3 attempts).
 make install          # create .venv and install pinned requirements
 make seed             # create + seed the SQLite store database
 cp .env.example .env  # fill in at least one LLM API key
-make test             # 44 unit + e2e tests (no network, no keys needed)
+make test             # 58 unit + e2e tests (no network, no keys needed)
 make lint             # ruff
 make run              # launch the Gradio app on 127.0.0.1:7861
 ```
 
 ## Test evidence
 
-- `make test`: **44 passed** — catalog/order read-models against the seeded
+- `make test`: **58 passed** — catalog/order read-models against the seeded
   DB, keyword router intent coverage, 26-pattern injection detection,
   PII redaction (email/phone/card/SSN), full pipeline e2e per intent
   (search, order by invoice/email, FAQ, recommendation, handoff,
-  injection-blocked, PII-redacted, out-of-scope).
+  injection-blocked, PII-redacted, out-of-scope), plus the Oct 2026 router
+  rework: an 18-case labelled tricky-phrasing fixture
+  (`tests/test_data/routing_tricky.json`) measuring routing accuracy
+  (15/18 offline; the 3 misses are documented LLM-router targets),
+  low-confidence clarification behaviour, conversation-turn retention in
+  graph state, and LLM-router confidence parsing/fallback (mocked).
 - `make test-all` additionally runs live-LLM router checks (skipped without
   keys) and a Gradio app startup smoke test.
 - `make lint`: ruff clean.

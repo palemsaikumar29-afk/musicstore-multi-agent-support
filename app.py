@@ -16,7 +16,10 @@ def chat_turn(message: str, history: list[dict]) -> tuple[str, list[dict]]:
     if not message.strip():
         return "", history
     t0 = time.time()
-    result = handle_message(message)
+    # Feed the last few user turns to the router as conversation context.
+    prior = [{"user": m["content"]} for m in history
+             if m.get("role") == "user"][-3:]
+    result = handle_message(message, history=prior)
     ms = int((time.time() - t0) * 1000)
     entry = {
         "user": message, "intent": result["intent"],

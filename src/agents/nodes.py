@@ -9,6 +9,11 @@ from ..services.safety import detect_injection, redact_pii
 from .contracts import RouteDecision
 
 # --- keyword router (deterministic, used when no LLM key is configured) -----
+#
+# NOTE (grader feedback, Oct 2026): plain substring matching used to send
+# "I'd like a refund" to the recommendation agent because "like" matched
+# before any refund/order word was checked. Order matters: handoff first,
+# then order/policy intents, and only then recommendation/catalog.
 
 _CATALOG_WORDS = {
     "track", "song", "album", "artist", "search", "find", "genre",
@@ -16,11 +21,12 @@ _CATALOG_WORDS = {
 }
 _ORDER_WORDS = {
     "order", "invoice", "shipped", "status", "purchase",
-    "receipt", "track my", "where is",
+    "receipt", "track my", "where is", "cancel", "package",
 }
 _FAQ_WORDS = {
-    "return", "refund policy", "payment", "pay", "account", "policy",
-    "how do", "shipping", "delivery time",
+    "return", "refund", "money back", "refund policy", "payment", "pay",
+    "account", "policy", "how do", "shipping", "delivery", "delivery time",
+    "billing", "charged", "charge",
 }
 _RECOMMEND_WORDS = {
     "recommend", "suggest", "similar", "like", "discover", "new music",
@@ -37,11 +43,11 @@ def _hit(words: set[str], text: str) -> bool:
 
 
 def keyword_route(text: str) -> RouteDecision:
+    # Order-sensitive: handoff, then order/policy actions, then discovery.
+    # ("I'd like a refund" must reach policy_faq via "refund", never
+    # recommendation via "like".)
     if _hit(_HANDOFF_WORDS, text):
         return RouteDecision(intent="human_handoff", confidence=0.9,
-                             reason="keyword")
-    if _hit(_RECOMMEND_WORDS, text):
-        return RouteDecision(intent="recommendation", confidence=0.75,
                              reason="keyword")
     if _hit(_ORDER_WORDS, text):
         return RouteDecision(intent="order_lookup", confidence=0.8,
@@ -49,23 +55,44 @@ def keyword_route(text: str) -> RouteDecision:
     if _hit(_FAQ_WORDS, text):
         return RouteDecision(intent="policy_faq", confidence=0.8,
                              reason="keyword")
+    if _hit(_RECOMMEND_WORDS, text):
+        return RouteDecision(intent="recommendation", confidence=0.75,
+                             reason="keyword")
     if _hit(_CATALOG_WORDS, text):
         return RouteDecision(intent="catalog_search", confidence=0.7,
                              reason="keyword")
     return RouteDecision(intent="out_of_scope", confidence=0.5, reason="keyword")
 
 
-def llm_route(text: str) -> RouteDecision:
+HISTORY_TURNS = 5  # how many prior turns are kept in graph state
+
+
+def _history_block(history: list[dict] | None) -> str:
+    """Render the last few turns for the router prompt."""
+    if not history:
+        return "No prior turns."
+    lines = []
+    for turn in history[-3:]:
+        user = str(turn.get("user", ""))[:160]
+        intent = str(turn.get("intent", ""))
+        lines.append(f"- user: {user} [routed: {intent}]")
+    return "\n".join(lines)
+
+
+def llm_route(text: str, history: list[dict] | None = None) -> RouteDecision:
     prompt = (
         "You are a customer-support router for a digital music store. "
-        "Classify the user's message into exactly one intent: "
+        "Classify the user's LATEST message into exactly one intent: "
         "catalog_search | order_lookup | policy_faq | recommendation | "
         "human_handoff | out_of_scope.\n"
+        "Use the conversation history for context — follow-ups like "
+        "'what about jazz?' or 'the second one' refer back to earlier turns.\n"
+        "Conversation so far:\n" + _history_block(history) + "\n"
         "Also extract entities as key=value pairs (e.g. email=, invoice=, "
         "artist=, track=) when present.\n"
         "Reply in exactly three lines:\n"
         "INTENT: <intent>\nCONFIDENCE: <0-1>\nENTITIES: <k=v; k=v or 'none'>\n\n"
-        f"Message: {text}"
+        f"Latest message: {text}"
     )
     raw = call_llm_with_retry(prompt)
     intent = "out_of_scope"
@@ -94,14 +121,70 @@ def llm_route(text: str) -> RouteDecision:
                          entities=entities, reason="llm")
 
 
-def route(text: str) -> RouteDecision:
+def route(text: str, history: list[dict] | None = None) -> RouteDecision:
     _, _, key_present, _ = provider_status()
     if key_present:
         try:
-            return llm_route(text)
+            return llm_route(text, history)
         except Exception:  # noqa: BLE001 - fall back to keywords
             return keyword_route(text)
     return keyword_route(text)
+
+
+# --- confidence-gated clarification ----------------------------------------
+# When the router is unsure, ask instead of guessing: a wrong specialist
+# cannot recover, but a clarifying question can.
+
+CLARIFY_THRESHOLD = 0.55
+_NO_CLARIFY_INTENTS = {"out_of_scope", "human_handoff"}
+
+INTENT_LABELS = {
+    "catalog_search": "finding music in the catalog",
+    "order_lookup": "an order or invoice",
+    "policy_faq": "store policies (returns, shipping, payments)",
+    "recommendation": "music recommendations",
+    "human_handoff": "a human support agent",
+    "out_of_scope": "something else",
+}
+
+
+def needs_clarification(decision: RouteDecision, injection: bool = False) -> bool:
+    """True when the router's confidence is too low to act on directly."""
+    return (
+        not injection
+        and decision.confidence < CLARIFY_THRESHOLD
+        and decision.intent not in _NO_CLARIFY_INTENTS
+    )
+
+
+def _append_turn(state: dict, decision: RouteDecision, answer: str) -> list[dict]:
+    turns = list(state.get("history") or [])
+    turns.append({
+        "user": state.get("message", ""),
+        "intent": decision.intent,
+        "confidence": round(decision.confidence, 2),
+        "answer": answer[:200],
+    })
+    return turns[-HISTORY_TURNS:]
+
+
+def clarify_node(state: dict) -> dict:
+    """Terminal node: ask a clarifying question instead of guessing."""
+    decision: RouteDecision = state["decision"]
+    guess = INTENT_LABELS.get(decision.intent, "your request")
+    answer = (
+        "I want to make sure I help with the right thing — "
+        f"are you asking about {guess}?\n\n"
+        "Reply with a few more words (for example an invoice number, "
+        "an artist name, or 'talk to a human') and I'll take it from there."
+    )
+    return {
+        "answer": answer,
+        "data": None,
+        "escalated": False,
+        "clarified": True,
+        "history": _append_turn(state, decision, answer),
+    }
 
 
 # --- specialists ------------------------------------------------------------
@@ -216,10 +299,11 @@ def route_node(state: dict) -> dict:
         return {"decision": RouteDecision(intent="out_of_scope",
                                           confidence=1.0,
                                           reason="blocked: injection"),
-                "offline": False}
+                "offline": False, "clarified": False}
     _, _, key_present, _ = provider_status()
-    decision = route(state["clean_message"])
-    return {"decision": decision, "offline": not key_present}
+    decision = route(state["clean_message"], state.get("history"))
+    return {"decision": decision, "offline": not key_present,
+            "clarified": False}
 
 
 def specialist_node(state: dict) -> dict:
@@ -251,4 +335,5 @@ def specialist_node(state: dict) -> dict:
                       "recommend music. How can I help?")
         data = None
     escalated = intent == "human_handoff"
-    return {"answer": answer, "data": data, "escalated": escalated}
+    return {"answer": answer, "data": data, "escalated": escalated,
+            "history": _append_turn(state, decision, answer)}

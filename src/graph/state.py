@@ -21,6 +21,10 @@ class SupportState(TypedDict, total=False):
     pii_kinds: list[str]
     decision: RouteDecision
     offline: bool
+    clarified: bool
     answer: str
     data: Any
     escalated: bool
+    # Last few conversation turns (user/intent/answer), capped at
+    # HISTORY_TURNS by the nodes that append to it.
+    history: list[dict]
